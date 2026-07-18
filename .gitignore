@@ -1,0 +1,14 @@
+PROMPT.md
+READ.md
+
+# dependencies
+node_modules/
+
+# local Claude Code permissions (machine-specific, not shared config)
+.claude/settings.local.json
+
+# env / secrets
+.env
+.env.*
+*.pem
+*.key

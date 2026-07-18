@@ -1,0 +1,16 @@
+{
+  "name": "agent-smith",
+  "version": "0.1.0",
+  "description": "A goal-fidelity watchdog for AI coding agents",
+  "main": "index.js",
+  "type": "commonjs",
+  "bin": {
+    "smith": "./bin/smith.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "supermemory": "^3.14.0"
+  }
+}
