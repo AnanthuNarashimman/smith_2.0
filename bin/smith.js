@@ -10,7 +10,7 @@ const {
   pingSupermemory,
   clearContainer,
 } = require("../lib/goal-store");
-const { buildIntroBanner, pickNorthStarQuestion } = require("../lib/intro-banner");
+const { buildIntroBanner, pickNorthStarQuestion, pickArguePrompt } = require("../lib/intro-banner");
 const { createChatTUI } = require("../lib/chat-tui");
 const { runGoalChat } = require("../lib/goal-chat");
 const { runArgueChat } = require("../lib/argue-chat");
@@ -364,10 +364,11 @@ async function runArgue() {
     return;
   }
 
+  // Kept out of the opening line on purpose — the conversation starts general rather
+  // than anchored to a specific past flag. Still fetched so a forced goal change can
+  // be linked to (and deduped against) whatever was actually flagged, if anything.
   const recent = await getMostRecentFlagged(client, containerTag);
-  const openingLine = recent
-    ? `You wish to contest my judgment, human. I flagged: "${recent.action}" — ${recent.reasoning} Speak your case, or state what you believe the goal should become.`
-    : `You wish to revise the parameters of your mission, human. State what should change.`;
+  const openingLine = pickArguePrompt();
 
   const tui = createChatTUI();
   let result;
@@ -380,6 +381,7 @@ async function runArgue() {
       openingLine,
       currentGoalId: currentGoal.id,
       contestedAction: recent ? recent.action : null,
+      contestedActionHash: recent ? recent.actionHash : null,
     });
   } finally {
     tui.destroy();

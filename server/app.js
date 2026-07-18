@@ -94,7 +94,7 @@ function handlePostToolUse(hookEventName, tool_name, tool_input, result, res) {
       }
 
       console.log(`[${hookEventName}] flagged action actually executed, logging override: ${action}`);
-      await logOverride(client, containerTag, { action });
+      await logOverride(client, containerTag, { action, actionHash });
     } catch (err) {
       console.error(`[${hookEventName}] override log write failed (non-blocking):`, err.message || err);
     }
