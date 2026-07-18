@@ -7,6 +7,7 @@ const { getContainerTag, getClient, findGoal } = require("../lib/goal-store");
 const { logDecision, wasFlaggedContradiction } = require("../lib/decision-log");
 const { logOverride } = require("../lib/override-log");
 const { hashToolCall } = require("../lib/action-hash");
+const { pushDecision, pushOverride } = require("../lib/dashboard-client");
 
 function describeAction(tool_name, tool_input) {
   if (tool_name === "Bash") return `Run shell command: ${tool_input.command}`;
@@ -38,6 +39,17 @@ function requireClient() {
   return getClient(config.supermemoryApiKey);
 }
 
+// Dashboard sync is best-effort on top of the Supermemory writes, not a replacement for
+// them — if there's no token or the project was never registered (e.g. dashboard was
+// down during `smith init`), just skip it silently rather than erroring the request.
+function getDashboardTarget(containerTag) {
+  const config = readConfig();
+  if (!config || !config.webAccessToken) return null;
+  const projectId = config.dashboardProjects && config.dashboardProjects[containerTag];
+  if (!projectId) return null;
+  return { token: config.webAccessToken, projectId };
+}
+
 async function handlePreToolUse(tool_name, tool_input, result, res) {
   try {
     const containerTag = getContainerTag();
@@ -58,6 +70,15 @@ async function handlePreToolUse(tool_name, tool_input, result, res) {
     logDecision(client, containerTag, { action, actionHash, contradicts: verdict.contradicts, reasoning: verdict.reasoning }).catch(
       (err) => console.error("[PreToolUse] decision log write failed (non-blocking):", err.message || err)
     );
+
+    const dashboardTarget = getDashboardTarget(containerTag);
+    if (dashboardTarget) {
+      pushDecision(dashboardTarget.token, dashboardTarget.projectId, {
+        action,
+        contradicts: verdict.contradicts,
+        reasoning: verdict.reasoning,
+      }).catch((err) => console.error("[PreToolUse] dashboard push failed (non-blocking):", err.message || err));
+    }
 
     if (!verdict.contradicts) {
       return res.json(allow());
@@ -95,6 +116,13 @@ function handlePostToolUse(hookEventName, tool_name, tool_input, result, res) {
 
       console.log(`[${hookEventName}] flagged action actually executed, logging override: ${action}`);
       await logOverride(client, containerTag, { action, actionHash });
+
+      const dashboardTarget = getDashboardTarget(containerTag);
+      if (dashboardTarget) {
+        pushOverride(dashboardTarget.token, dashboardTarget.projectId, { action, actionHash }).catch((err) =>
+          console.error(`[${hookEventName}] dashboard push failed (non-blocking):`, err.message || err)
+        );
+      }
     } catch (err) {
       console.error(`[${hookEventName}] override log write failed (non-blocking):`, err.message || err);
     }

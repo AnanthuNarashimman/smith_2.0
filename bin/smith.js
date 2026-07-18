@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 const fs = require("fs");
+const { execSync } = require("child_process");
 const readline = require("readline/promises");
 
 const { readConfig, writeConfig, PROVIDERS, CONFIG_PATH } = require("../lib/config");
@@ -15,11 +16,12 @@ const { createChatTUI } = require("../lib/chat-tui");
 const { runGoalChat } = require("../lib/goal-chat");
 const { runArgueChat } = require("../lib/argue-chat");
 const { ensureHooksConfigured } = require("../lib/hooks-setup");
-const { ensureSkillConfigured } = require("../lib/skill-setup");
+const { ensureSkillConfigured, ensureCommitSkillConfigured } = require("../lib/skill-setup");
 const { ensureServerRunning, stopServer } = require("../lib/server-launcher");
 const { computeConsistencyScore } = require("../lib/consistency-score");
 const { buildScoreBanner } = require("../lib/status-banner");
 const { getMostRecentFlagged } = require("../lib/decision-log");
+const { pingDashboard, registerProject, syncStatus } = require("../lib/dashboard-client");
 
 const PROVIDER_NAMES = Object.keys(PROVIDERS);
 
@@ -122,18 +124,72 @@ async function collectSupermemoryKey(rl) {
   }
 }
 
+async function collectWebToken(rl) {
+  while (true) {
+    const webAccessToken = await askWizard(rl, "Enter your Agent Smith dashboard access token: ");
+    if (!webAccessToken) {
+      console.log("Access token cannot be empty.");
+      continue;
+    }
+    process.stdout.write("Validating token... ");
+    try {
+      await pingDashboard(webAccessToken);
+      console.log("ok.");
+      return webAccessToken;
+    } catch (err) {
+      console.log("failed.");
+      console.log(`  ${err.message || err}`);
+    }
+  }
+}
+
+function latestCommitMessage() {
+  try {
+    return (
+      execSync("git log -1 --format=%s", { stdio: ["ignore", "pipe", "ignore"] }).toString().trim() || null
+    );
+  } catch {
+    return null;
+  }
+}
+
+// Non-blocking by design: a dashboard hiccup shouldn't stop `smith init` from
+// finishing the goal-setting chat, matching the fail-open philosophy used everywhere
+// else in this codebase. Caches the resolved projectId on the config so later pushes
+// (from the watchdog server, from `smith update`) don't need to re-register every time.
+async function ensureProjectRegistered(config, containerTag, goalText) {
+  const cached = config.dashboardProjects && config.dashboardProjects[containerTag];
+  if (cached) return config;
+
+  try {
+    const projectId = await registerProject(config.webAccessToken, containerTag, goalText);
+    const updated = {
+      ...config,
+      dashboardProjects: { ...(config.dashboardProjects || {}), [containerTag]: projectId },
+    };
+    writeConfig(updated);
+    console.log("Project registered with the Agent Smith dashboard.");
+    return updated;
+  } catch (err) {
+    console.error(`Failed to register project with the dashboard (non-blocking): ${err.message || err}`);
+    return config;
+  }
+}
+
 async function runInit() {
   let config = readConfig();
   const hasProvider = config && config.provider && config.apiKey && PROVIDERS[config.provider];
   const hasSupermemory = config && config.supermemoryApiKey;
+  const hasWebToken = config && config.webAccessToken;
 
-  if (hasProvider && hasSupermemory) {
+  if (hasProvider && hasSupermemory && hasWebToken) {
     console.log("Using existing configuration.");
   } else {
     const outcome = await withWizard("Setup cancelled — nothing was saved.", async (rl) => {
       let provider = hasProvider ? config.provider : null;
       let apiKey = hasProvider ? config.apiKey : null;
       let supermemoryApiKey = hasSupermemory ? config.supermemoryApiKey : null;
+      let webAccessToken = hasWebToken ? config.webAccessToken : null;
 
       if (!hasProvider) {
         const collected = await collectProvider(rl);
@@ -145,7 +201,11 @@ async function runInit() {
         supermemoryApiKey = await collectSupermemoryKey(rl);
       }
 
-      return { provider, apiKey, supermemoryApiKey };
+      if (!hasWebToken) {
+        webAccessToken = await collectWebToken(rl);
+      }
+
+      return { ...(config || {}), provider, apiKey, supermemoryApiKey, webAccessToken };
     });
 
     if (outcome.cancelled) return;
@@ -159,6 +219,11 @@ async function runInit() {
 
   const skillResult = ensureSkillConfigured();
   console.log(skillResult.changed ? "/smith-score command installed." : "/smith-score command already installed.");
+
+  const commitSkillResult = ensureCommitSkillConfigured();
+  console.log(
+    commitSkillResult.changed ? "/smith-commit command installed." : "/smith-commit command already installed."
+  );
 
   console.log("Starting Agent Smith server...");
   const serverResult = await ensureServerRunning();
@@ -179,6 +244,8 @@ async function runInit() {
     process.exitCode = 1;
     return;
   }
+
+  config = await ensureProjectRegistered(config, containerTag, existingGoal ? existingGoal.memory : null);
 
   if (existingGoal) {
     console.log("A goal is already set for this project:\n");
@@ -212,6 +279,13 @@ async function runInit() {
     return;
   }
 
+  const projectId = config.dashboardProjects && config.dashboardProjects[containerTag];
+  if (projectId) {
+    syncStatus(config.webAccessToken, projectId, { goal: result.goal, message: null }).catch((err) =>
+      console.error(`Failed to sync new goal with dashboard (non-blocking): ${err.message || err}`)
+    );
+  }
+
   console.log("\nGoal stored and confirmed:\n");
   console.log(result.goal);
 }
@@ -221,17 +295,22 @@ async function runUpdateKey() {
 
   const outcome = await withWizard("Update cancelled — nothing was changed.", async (rl) => {
     let target;
-    while (target !== "provider" && target !== "supermemory") {
-      const answer = await askWizard(rl, "Which key would you like to update? (provider/supermemory): ");
+    while (target !== "provider" && target !== "supermemory" && target !== "web") {
+      const answer = await askWizard(rl, "Which key would you like to update? (provider/supermemory/web): ");
       target = answer.toLowerCase();
-      if (target !== "provider" && target !== "supermemory") {
-        console.log('Please answer "provider" or "supermemory".');
+      if (target !== "provider" && target !== "supermemory" && target !== "web") {
+        console.log('Please answer "provider", "supermemory", or "web".');
       }
     }
 
     if (target === "provider") {
       const { provider, apiKey } = await collectProvider(rl);
       return { ...existing, provider, apiKey };
+    }
+
+    if (target === "web") {
+      const webAccessToken = await collectWebToken(rl);
+      return { ...existing, webAccessToken };
     }
 
     const supermemoryApiKey = await collectSupermemoryKey(rl);
@@ -346,6 +425,46 @@ async function off() {
   );
 }
 
+async function runUpdate(message) {
+  const config = readConfig();
+  if (!config || !config.webAccessToken) {
+    console.log("No dashboard access token configured. Run `smith init` first.");
+    process.exitCode = 1;
+    return;
+  }
+
+  const containerTag = getContainerTag();
+
+  let goalText = null;
+  if (config.supermemoryApiKey) {
+    try {
+      const client = getClient(config.supermemoryApiKey);
+      const goal = await findGoal(client, containerTag);
+      goalText = goal ? goal.memory : null;
+    } catch {
+      // Non-fatal — the sync can still go through without a fresh goal text.
+    }
+  }
+
+  try {
+    let projectId = config.dashboardProjects && config.dashboardProjects[containerTag];
+    if (!projectId) {
+      projectId = await registerProject(config.webAccessToken, containerTag, goalText);
+      writeConfig({
+        ...config,
+        dashboardProjects: { ...(config.dashboardProjects || {}), [containerTag]: projectId },
+      });
+    }
+
+    const finalMessage = message || latestCommitMessage();
+    await syncStatus(config.webAccessToken, projectId, { goal: goalText, message: finalMessage });
+    console.log("Synced with the Agent Smith dashboard.");
+  } catch (err) {
+    console.error(`Failed to sync with the dashboard: ${err.message || err}`);
+    process.exitCode = 1;
+  }
+}
+
 async function runArgue() {
   const config = readConfig();
   if (!config || !config.supermemoryApiKey) {
@@ -435,7 +554,13 @@ async function main() {
     return;
   }
 
-  console.log("Usage: smith <init|update-key|reset|clear|status|off|argue>");
+  if (command === "update") {
+    const message = process.argv.slice(3).join(" ") || null;
+    await runUpdate(message);
+    return;
+  }
+
+  console.log("Usage: smith <init|update-key|reset|clear|status|off|argue|update>");
   process.exitCode = command ? 1 : 0;
 }
 
