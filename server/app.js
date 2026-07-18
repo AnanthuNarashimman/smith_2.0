@@ -6,6 +6,7 @@ const { readConfig } = require("../lib/config");
 const { getContainerTag, getClient, findGoal } = require("../lib/goal-store");
 const { logDecision, wasFlaggedContradiction } = require("../lib/decision-log");
 const { logOverride } = require("../lib/override-log");
+const { hashToolCall } = require("../lib/action-hash");
 
 function describeAction(tool_name, tool_input) {
   if (tool_name === "Bash") return `Run shell command: ${tool_input.command}`;
@@ -49,11 +50,12 @@ async function handlePreToolUse(tool_name, tool_input, result, res) {
     }
 
     const action = describeAction(tool_name, tool_input);
+    const actionHash = hashToolCall(tool_name, tool_input);
     const verdict = await judgeContradiction({ goal: goalMemory.memory, action });
 
-    console.log(`[PreToolUse] contradicts=${verdict.contradicts} reasoning=${verdict.reasoning}`);
+    console.log(`[PreToolUse] contradicts=${verdict.contradicts} action=${action} reasoning=${verdict.reasoning}`);
 
-    logDecision(client, containerTag, { action, contradicts: verdict.contradicts, reasoning: verdict.reasoning }).catch(
+    logDecision(client, containerTag, { action, actionHash, contradicts: verdict.contradicts, reasoning: verdict.reasoning }).catch(
       (err) => console.error("[PreToolUse] decision log write failed (non-blocking):", err.message || err)
     );
 
@@ -68,7 +70,12 @@ async function handlePreToolUse(tool_name, tool_input, result, res) {
   }
 }
 
-function handlePostToolUse(tool_name, tool_input, result, res) {
+// Shared by PostToolUse and PostToolUseFailure: an approved action that got flagged
+// is an override the moment the user lets it run, regardless of whether the command
+// itself later succeeds or errors out — a failing `winget install` is still evidence
+// the user chose to override Smith's flag, so a failure shouldn't erase that decision
+// from the score just because Claude Code routes success/failure to different hooks.
+function handlePostToolUse(hookEventName, tool_name, tool_input, result, res) {
   res.json({});
 
   if (!result.matched) return;
@@ -78,17 +85,18 @@ function handlePostToolUse(tool_name, tool_input, result, res) {
       const containerTag = getContainerTag();
       const client = requireClient();
       const action = describeAction(tool_name, tool_input);
+      const actionHash = hashToolCall(tool_name, tool_input);
 
-      const wasReallyFlagged = await wasFlaggedContradiction(client, containerTag, action);
+      const wasReallyFlagged = await wasFlaggedContradiction(client, containerTag, actionHash);
       if (!wasReallyFlagged) {
-        console.log(`[PostToolUse] matched static filter but was not a real contradiction, skipping override: ${action}`);
+        console.log(`[${hookEventName}] matched static filter but was not a real contradiction, skipping override: ${action}`);
         return;
       }
 
-      console.log(`[PostToolUse] flagged action actually executed, logging override: ${action}`);
+      console.log(`[${hookEventName}] flagged action actually executed, logging override: ${action}`);
       await logOverride(client, containerTag, { action });
     } catch (err) {
-      console.error("[PostToolUse] override log write failed (non-blocking):", err.message || err);
+      console.error(`[${hookEventName}] override log write failed (non-blocking):`, err.message || err);
     }
   })();
 }
@@ -101,8 +109,8 @@ function createApp() {
     const { hook_event_name, tool_name, tool_input } = req.body || {};
     const result = checkToolCall({ tool: tool_name, input: tool_input || {} });
 
-    if (hook_event_name === "PostToolUse") {
-      return handlePostToolUse(tool_name, tool_input || {}, result, res);
+    if (hook_event_name === "PostToolUse" || hook_event_name === "PostToolUseFailure") {
+      return handlePostToolUse(hook_event_name, tool_name, tool_input || {}, result, res);
     }
 
     if (!result.matched) {
