@@ -13,6 +13,11 @@ const {
 const { buildIntroBanner, pickNorthStarQuestion } = require("../lib/intro-banner");
 const { createChatTUI } = require("../lib/chat-tui");
 const { runGoalChat } = require("../lib/goal-chat");
+const { ensureHooksConfigured } = require("../lib/hooks-setup");
+const { ensureSkillConfigured } = require("../lib/skill-setup");
+const { ensureServerRunning, stopServer } = require("../lib/server-launcher");
+const { computeConsistencyScore } = require("../lib/consistency-score");
+const { buildScoreBanner } = require("../lib/status-banner");
 
 const PROVIDER_NAMES = Object.keys(PROVIDERS);
 
@@ -147,6 +152,20 @@ async function runInit() {
     console.log("Configuration saved.");
   }
 
+  const hooksResult = ensureHooksConfigured();
+  console.log(hooksResult.changed ? "Claude Code hooks configured." : "Claude Code hooks already configured.");
+
+  const skillResult = ensureSkillConfigured();
+  console.log(skillResult.changed ? "/smith-score command installed." : "/smith-score command already installed.");
+
+  console.log("Starting Agent Smith server...");
+  const serverResult = await ensureServerRunning();
+  console.log(
+    serverResult.started
+      ? `Agent Smith server started on port ${serverResult.port}.`
+      : `Agent Smith server already running on port ${serverResult.port}.`
+  );
+
   const containerTag = getContainerTag();
   const client = getClient(config.supermemoryApiKey);
 
@@ -274,6 +293,56 @@ async function runClear() {
   }
 }
 
+async function status() {
+  const config = readConfig();
+  if (!config || !config.supermemoryApiKey) {
+    console.log("No configuration found. Run `smith init` first.");
+    process.exitCode = 1;
+    return;
+  }
+
+  const containerTag = getContainerTag();
+  const client = getClient(config.supermemoryApiKey);
+
+  console.log(`containerTag: ${containerTag}`);
+
+  const goal = await findGoal(client, containerTag);
+  if (!goal) {
+    console.log("\nNo goal set for this project yet. Run `smith init` first.");
+    return;
+  }
+  console.log(`\nGoal: "${goal.memory}"`);
+
+  const { score, flaggedCount, keptCount, overriddenCount, flaggedDecisions } = await computeConsistencyScore(
+    client,
+    containerTag
+  );
+
+  console.log("\n" + buildScoreBanner(score));
+
+  if (score === null) {
+    console.log("\n(nothing flagged yet)");
+    return;
+  }
+
+  console.log(`\n${keptCount} kept / ${flaggedCount} flagged, ${overriddenCount} overridden`);
+  console.log("\nFlagged history:");
+  for (const d of flaggedDecisions) {
+    const [actionLine, , reasoningLine] = d.content.split("\n");
+    console.log(`  [${d.createdAt}] ${actionLine}`);
+    if (reasoningLine) console.log(`    ${reasoningLine}`);
+  }
+}
+
+async function off() {
+  const result = await stopServer();
+  console.log(
+    result.stopped
+      ? `Agent Smith server on port ${result.port} stopped.`
+      : `No Agent Smith server was running on port ${result.port}.`
+  );
+}
+
 async function main() {
   const [, , command, subcommand] = process.argv;
 
@@ -297,7 +366,17 @@ async function main() {
     return;
   }
 
-  console.log("Usage: smith <init|update-key|reset|clear>");
+  if (command === "status") {
+    await status();
+    return;
+  }
+
+  if (command === "off") {
+    await off();
+    return;
+  }
+
+  console.log("Usage: smith <init|update-key|reset|clear|status|off>");
   process.exitCode = command ? 1 : 0;
 }
 

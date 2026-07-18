@@ -1,11 +1,14 @@
 PROMPT.md
 READ.md
+PROMPT-2-hooks-and-score.md
 
 # dependencies
 node_modules/
 
-# local Claude Code permissions (machine-specific, not shared config)
+# local/generated Claude Code config (machine-specific, not shared config)
 .claude/settings.local.json
+.claude/settings.json
+.claude/skills/
 
 # env / secrets
 .env

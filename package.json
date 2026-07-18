@@ -11,6 +11,7 @@
     "node": ">=18"
   },
   "dependencies": {
+    "express": "^5.2.1",
     "supermemory": "^4.24.12"
   }
 }
