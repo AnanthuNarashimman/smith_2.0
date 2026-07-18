@@ -286,7 +286,9 @@ async function runClear() {
   const client = getClient(config.supermemoryApiKey);
   try {
     await clearContainer(client, containerTag);
-    console.log(`Cleared all Supermemory data for project "${containerTag}".`);
+    console.log(
+      `Cleared all Supermemory data for project "${containerTag}" — goal, decision history, and Consistency Score have all been reset.`
+    );
   } catch (err) {
     console.error(`Failed to clear Supermemory data: ${err.message || err}`);
     process.exitCode = 1;
@@ -318,14 +320,13 @@ async function status() {
     containerTag
   );
 
-  console.log("\n" + buildScoreBanner(score));
+  console.log("\n" + buildScoreBanner(score, { flaggedCount, keptCount, overriddenCount }));
 
   if (score === null) {
     console.log("\n(nothing flagged yet)");
     return;
   }
 
-  console.log(`\n${keptCount} kept / ${flaggedCount} flagged, ${overriddenCount} overridden`);
   console.log("\nFlagged history:");
   for (const d of flaggedDecisions) {
     const [actionLine, , reasoningLine] = d.content.split("\n");
