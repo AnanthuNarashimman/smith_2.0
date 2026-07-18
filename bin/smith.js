@@ -13,11 +13,13 @@ const {
 const { buildIntroBanner, pickNorthStarQuestion } = require("../lib/intro-banner");
 const { createChatTUI } = require("../lib/chat-tui");
 const { runGoalChat } = require("../lib/goal-chat");
+const { runArgueChat } = require("../lib/argue-chat");
 const { ensureHooksConfigured } = require("../lib/hooks-setup");
 const { ensureSkillConfigured } = require("../lib/skill-setup");
 const { ensureServerRunning, stopServer } = require("../lib/server-launcher");
 const { computeConsistencyScore } = require("../lib/consistency-score");
 const { buildScoreBanner } = require("../lib/status-banner");
+const { getMostRecentFlagged } = require("../lib/decision-log");
 
 const PROVIDER_NAMES = Object.keys(PROVIDERS);
 
@@ -344,6 +346,55 @@ async function off() {
   );
 }
 
+async function runArgue() {
+  const config = readConfig();
+  if (!config || !config.supermemoryApiKey) {
+    console.log("No configuration found. Run `smith init` first.");
+    process.exitCode = 1;
+    return;
+  }
+
+  const containerTag = getContainerTag();
+  const client = getClient(config.supermemoryApiKey);
+
+  const currentGoal = await findGoal(client, containerTag);
+  if (!currentGoal) {
+    console.log("No goal set for this project yet. Run `smith init` first.");
+    process.exitCode = 1;
+    return;
+  }
+
+  const recent = await getMostRecentFlagged(client, containerTag);
+  const openingLine = recent
+    ? `You wish to contest my judgment, human. I flagged: "${recent.action}" — ${recent.reasoning} Speak your case, or state what you believe the goal should become.`
+    : `You wish to revise the parameters of your mission, human. State what should change.`;
+
+  const tui = createChatTUI();
+  let result;
+  try {
+    result = await runArgueChat({
+      client,
+      containerTag,
+      config: { provider: config.provider, apiKey: config.apiKey },
+      tui,
+      openingLine,
+      currentGoalId: currentGoal.id,
+      contestedAction: recent ? recent.action : null,
+    });
+  } finally {
+    tui.destroy();
+  }
+
+  if (result.cancelled) {
+    console.log("\nNo changes were made.");
+    process.exitCode = 1;
+    return;
+  }
+
+  console.log("\nGoal updated (this has been logged as an override against your Consistency Score):\n");
+  console.log(result.goal);
+}
+
 async function main() {
   const [, , command, subcommand] = process.argv;
 
@@ -377,7 +428,12 @@ async function main() {
     return;
   }
 
-  console.log("Usage: smith <init|update-key|reset|clear|status|off>");
+  if (command === "argue") {
+    await runArgue();
+    return;
+  }
+
+  console.log("Usage: smith <init|update-key|reset|clear|status|off|argue>");
   process.exitCode = command ? 1 : 0;
 }
 
