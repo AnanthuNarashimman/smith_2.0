@@ -351,10 +351,14 @@ async function runClear() {
 
   const containerTag = getContainerTag();
 
+  const linkedToDashboard = Boolean(config.dashboardProjects && config.dashboardProjects[containerTag]);
+
   const outcome = await withWizard("Clear cancelled — nothing was deleted.", (rl) =>
     askYesNo(
       rl,
-      `This will permanently delete ALL stored memories (including any goal) for project "${containerTag}" from Supermemory. This cannot be undone. Continue?`
+      `This will permanently delete ALL stored memories (including any goal) for project "${containerTag}" from Supermemory${
+        linkedToDashboard ? ", and unlink it from the dashboard" : ""
+      }. This cannot be undone. Continue?`
     )
   );
 
@@ -367,12 +371,27 @@ async function runClear() {
   const client = getClient(config.supermemoryApiKey);
   try {
     await clearContainer(client, containerTag);
-    console.log(
-      `Cleared all Supermemory data for project "${containerTag}" — goal, decision history, and Consistency Score have all been reset.`
-    );
   } catch (err) {
     console.error(`Failed to clear Supermemory data: ${err.message || err}`);
     process.exitCode = 1;
+    return;
+  }
+
+  // Drop the cached dashboard projectId as well. `smith clear` resets the project back
+  // to a blank slate, so holding on to the pointer would leave the next `smith init`
+  // short-circuiting in ensureProjectRegistered() and pushing to a project the user
+  // considers gone — which 404s for good if the row was deleted server-side.
+  if (linkedToDashboard) {
+    const remaining = { ...config.dashboardProjects };
+    delete remaining[containerTag];
+    writeConfig({ ...config, dashboardProjects: remaining });
+  }
+
+  console.log(
+    `Cleared all Supermemory data for project "${containerTag}" — goal, decision history, and Consistency Score have all been reset.`
+  );
+  if (linkedToDashboard) {
+    console.log("Unlinked from the dashboard — the next `smith init` will register a fresh project.");
   }
 }
 
